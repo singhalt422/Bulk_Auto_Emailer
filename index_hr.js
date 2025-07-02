@@ -5,122 +5,238 @@ const fs = require('fs');
 const csv = require('csv-parser');
 const validator = require('email-validator');
 const bodyParser = require('body-parser');
-const mammoth = require('mammoth'); // For converting .docx to HTML
+const { v4: uuidv4 } = require('uuid');
 
 const app = express();
-const port = 8081;
+const port = process.env.PORT || 3000;
 
-// Middleware
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
 app.use(express.static('uploads'));
 
 const upload = multer({ dest: 'uploads/' });
 
-// Email transporter (Outlook SMTP)
 const transporter = nodemailer.createTransport({
   service: 'Outlook365',
   auth: {
-    user: 'richa@saarathee.com', // Your email
-    pass: 'P(455488459173'       // Your password or app password
+    user: 'inclusion.pwd@saarathee.com', // Replace with your real email
+    pass: 'S&412476630841'              // Use app password if 2FA is enabled
   }
 });
 
-// Download sample CSV
-app.get('/download-sample-csv', (req, res) => {
-  const csvContent = "Email\nsample1@example.com\nsample2@example.com\nsample3@example.com";
-  res.header('Content-Type', 'text/csv');
-  res.attachment('sample.csv');
-  res.send(csvContent);
-});
+const jobStatus = {};
 
-// Home route - form for uploading files
 app.get('/', (req, res) => {
   res.send(`
     <html>
-      <body>
-        <h1>Send Bulk Emails</h1>
-        <form action="/send-bulk-emails" method="post" enctype="multipart/form-data">
-          <label for="csvFile">Upload CSV File (Emails):</label>
-          <input type="file" name="csvFile" id="csvFile" required><br><br>
+    <head>
+      <title>Bulk Email Sender</title>
+      <style>
+        body {
+          font-family: Arial, sans-serif;
+          background: #eef2f7;
+          padding: 30px;
+        }
+        form {
+          background: #fff;
+          padding: 20px;
+          border-radius: 8px;
+          max-width: 600px;
+          box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        label {
+          font-weight: bold;
+          margin-top: 10px;
+          display: block;
+        }
+        input, textarea {
+          width: 100%;
+          padding: 8px;
+          margin-top: 5px;
+          margin-bottom: 15px;
+          border: 1px solid #ccc;
+          border-radius: 4px;
+        }
+        button {
+          padding: 10px 15px;
+          color: white;
+          border: none;
+          border-radius: 4px;
+          cursor: pointer;
+          margin-right: 10px;
+        }
+        #pauseBtn { background-color: #FF9800; }
+        #resumeBtn { background-color: #4CAF50; }
+        #stopBtn { background-color: #F44336; }
+        #refreshBtn { background-color: #0078D7; }
+        button:disabled {
+          background-color: #ccc;
+          cursor: not-allowed;
+        }
+        #status {
+          background-color: #e6f7ff;
+          border-left: 5px solid #1890ff;
+          padding: 15px;
+          margin-top: 20px;
+          white-space: pre-wrap;
+        }
+      </style>
+    </head>
+    <body>
+      <h2>Send Bulk Emails</h2>
+      <form id="emailForm" enctype="multipart/form-data">
+        <label for="csvFile">Upload CSV (with "Email" column):</label>
+        <input type="file" id="csvFile" name="csvFile" required>
 
-          <label for="docFile">Upload Word File (.docx) for Email Content:</label>
-          <input type="file" name="docFile" id="docFile" accept=".docx" required><br><br>
+        <label for="subject">Subject:</label>
+        <input type="text" id="subject" name="subject" required>
 
-          <label for="subject">Subject:</label><br>
-          <input type="text" name="subject" id="subject" placeholder="Email Subject" required><br><br>
+        <label for="content">Email Content:</label>
+        <textarea id="content" name="content" rows="8" required></textarea>
 
-          <button type="submit">Send Emails</button>
-        </form>
-        <br>
-        <a href="/download-sample-csv">Download Sample CSV</a>
-      </body>
+        <button type="submit">Send Emails</button>
+        <button type="button" id="pauseBtn" style="display:none;">Pause</button>
+        <button type="button" id="resumeBtn" style="display:none;">Resume</button>
+        <button type="button" id="stopBtn" style="display:none;">Stop</button>
+      </form>
+
+      <a href="/download-sample-csv" target="_blank">Download Sample CSV</a>
+
+      <div id="status" style="display:none;"></div>
+      <button id="refreshBtn" style="display:none;">Refresh Status</button>
+
+      <script>
+        let jobId = null;
+
+        document.getElementById('emailForm').addEventListener('submit', async function (e) {
+          e.preventDefault();
+          const formData = new FormData(this);
+          const res = await fetch('/send-bulk-emails', { method: 'POST', body: formData });
+          const data = await res.json();
+          jobId = data.jobId;
+
+          document.getElementById('status').style.display = 'block';
+          document.getElementById('status').innerText = 'Sending started...';
+          document.getElementById('pauseBtn').style.display = 'inline-block';
+          document.getElementById('stopBtn').style.display = 'inline-block';
+          document.getElementById('refreshBtn').style.display = 'inline-block';
+        });
+
+        document.getElementById('refreshBtn').addEventListener('click', async () => {
+          if (!jobId) return;
+          const res = await fetch('/email-status?jobId=' + jobId);
+          const status = await res.json();
+          document.getElementById('status').innerText = 
+            'Sent: ' + status.sent + '\\n' +
+            'Failed: ' + status.failed.length + '\\n' +
+            'Invalid: ' + status.invalid.length + '\\n' +
+            'Total: ' + status.total + '\\n' +
+            'Completed: ' + (status.completed ? 'Yes' : 'No');
+        });
+
+        async function controlJob(action) {
+          if (!jobId) return;
+          await fetch('/email-control', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ jobId, action })
+          });
+
+          if (action === 'pause') {
+            document.getElementById('pauseBtn').style.display = 'none';
+            document.getElementById('resumeBtn').style.display = 'inline-block';
+          } else if (action === 'resume') {
+            document.getElementById('resumeBtn').style.display = 'none';
+            document.getElementById('pauseBtn').style.display = 'inline-block';
+          } else if (action === 'stop') {
+            document.getElementById('pauseBtn').disabled = true;
+            document.getElementById('resumeBtn').disabled = true;
+            document.getElementById('stopBtn').disabled = true;
+          }
+        }
+
+        document.getElementById('pauseBtn').addEventListener('click', () => controlJob('pause'));
+        document.getElementById('resumeBtn').addEventListener('click', () => controlJob('resume'));
+        document.getElementById('stopBtn').addEventListener('click', () => controlJob('stop'));
+      </script>
+    </body>
     </html>
   `);
 });
 
-// Handle the form POST request
-app.post('/send-bulk-emails', upload.fields([{ name: 'csvFile' }, { name: 'docFile' }]), async (req, res) => {
+app.get('/download-sample-csv', (req, res) => {
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="sample.csv"');
+  res.send('Email\nexample1@example.com\nexample2@example.com');
+});
+
+app.post('/send-bulk-emails', upload.single('csvFile'), (req, res) => {
   const subject = req.body.subject;
-  const csvFilePath = req.files['csvFile'][0].path;
-  const docFilePath = req.files['docFile'][0].path;
+  const rawContent = req.body.content;
+  const content = `<pre>${convertUrlsToLinks(rawContent)}</pre>`;
+  const jobId = uuidv4();
+  const filePath = req.file.path;
 
-  // Convert Word doc (.docx) to HTML
-  let content = '';
-  try {
-    const result = await mammoth.convertToHtml({ path: docFilePath }, {
-      convertImage: mammoth.images.inline((element) => {
-        return element.read("base64").then((imageBuffer) => {
-          return {
-            src: "data:" + element.contentType + ";base64," + imageBuffer
-          };
-        });
-      })
-    });
-    content = result.value;
-  } catch (err) {
-    console.error("Error reading Word file:", err);
-    return res.send("<h1>Failed to read Word file</h1>");
-  }
+  const emails = [];
+  jobStatus[jobId] = {
+    sent: 0,
+    failed: [],
+    invalid: [],
+    total: 0,
+    completed: false,
+    paused: false,
+    stopped: false
+  };
 
-  // Extract email addresses from CSV
-  const emailAddresses = [];
-  fs.createReadStream(csvFilePath)
+  fs.createReadStream(filePath)
     .pipe(csv())
     .on('data', (row) => {
-      emailAddresses.push(row.Email);
+      if (row.Email) emails.push(row.Email.trim());
     })
-    .on('end', async () => {
-      await sendEmailsSerially(subject, emailAddresses, content, res);
-
-      // Clean up uploaded files
-      fs.unlinkSync(csvFilePath);
-      fs.unlinkSync(docFilePath);
+    .on('end', () => {
+      jobStatus[jobId].total = emails.length;
+      sendEmails(subject, emails, content, jobId);
+      res.json({ jobId });
     });
 });
 
-// Send emails one by one
-async function sendEmailsSerially(subject, emailAddresses, content, res) {
-  let emailCount = 0;
-  let failedEmails = [];
-  let notSentEmails = [];
+app.post('/email-control', (req, res) => {
+  const { jobId, action } = req.body;
+  const job = jobStatus[jobId];
 
-  const senderName = "Richa Bansal";
-  const senderEmail = "richa@saarathee.com";
+  if (!job) return res.status(404).json({ error: 'Invalid job ID' });
 
-  for (let i = 0; i < emailAddresses.length; i++) {
-    const email = emailAddresses[i];
+  if (action === 'pause') job.paused = true;
+  else if (action === 'resume') job.paused = false;
+  else if (action === 'stop') job.stopped = true;
+
+  res.json({ message: `Job ${action}d.` });
+});
+
+function convertUrlsToLinks(text) {
+  const regex = /(\b(https?|ftp):\/\/[-A-Z0-9+&@#\/%?=~_|!:,.;]*[-A-Z0-9+&@#\/%=~_|])/ig;
+  return text.replace(regex, '<a href="$1" target="_blank">$1</a>');
+}
+
+async function sendEmails(subject, emailList, content, jobId) {
+  const sender = "Tarun Singhal <inclusion.pwd@saarathee.com>";
+
+  for (const email of emailList) {
+    if (jobStatus[jobId].stopped) break;
+
+    while (jobStatus[jobId].paused) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
 
     if (!validator.validate(email)) {
-      console.log('Invalid email skipped:', email);
-      notSentEmails.push(email);
+      jobStatus[jobId].invalid.push(email);
       continue;
     }
 
     const mailOptions = {
-      from: `${senderName} <${senderEmail}>`,
+      from: sender,
       to: email,
-      subject: subject,
+      subject,
       html: content
     };
 
@@ -128,30 +244,29 @@ async function sendEmailsSerially(subject, emailAddresses, content, res) {
       await new Promise((resolve, reject) => {
         transporter.sendMail(mailOptions, (error, info) => {
           if (error) {
-            console.log('Error sending to:', email);
-            failedEmails.push(email);
-            reject(error);
-          } else {
-            console.log('Email sent to:', email);
-            emailCount++;
-            resolve(info);
+            jobStatus[jobId].failed.push(email);
+            return reject(error);
           }
+          jobStatus[jobId].sent++;
+          resolve(info);
         });
       });
-    } catch (error) {
-      // Already handled above
+    } catch (err) {
+      console.error(`Failed to send to ${email}:`, err.message);
     }
   }
 
-  res.send(`
-    <h1>Bulk Email Process Complete</h1>
-    <p>✅ Successfully sent ${emailCount} emails.</p>
-    <p>❌ Failed to send to ${failedEmails.length} emails: ${failedEmails.join(', ')}</p>
-    <p>⚠️ Invalid/skipped emails (${notSentEmails.length}): ${notSentEmails.join(', ')}</p>
-  `);
+  jobStatus[jobId].completed = true;
 }
 
-// Start server
+app.get('/email-status', (req, res) => {
+  const jobId = req.query.jobId;
+  if (!jobStatus[jobId]) {
+    return res.status(404).json({ error: 'Invalid job ID' });
+  }
+  res.json(jobStatus[jobId]);
+});
+
 app.listen(port, () => {
-  console.log(`🚀 Server started at: http://localhost:${port}`);
+  console.log(`✅ Server started at http://localhost:${port}`);
 });

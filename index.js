@@ -1,4 +1,4 @@
-const express = require('express');
+6:48 PM 7/2/2025const express = require('express');
 const nodemailer = require('nodemailer');
 const multer = require('multer');
 const fs = require('fs');
@@ -20,7 +20,7 @@ const transporter = nodemailer.createTransport({
   service: 'Outlook365',
   auth: {
     user: 'inclusion.pwd@saarathee.com', // Replace with your real email
-    pass: 'S&412476630841'              // Use app password if 2FA is on
+    pass: 'S&412476630841'              // Use app password if 2FA is enabled
   }
 });
 
@@ -34,7 +34,7 @@ app.get('/', (req, res) => {
       <style>
         body {
           font-family: Arial, sans-serif;
-          background: #f2f2f2;
+          background: #eef2f7;
           padding: 30px;
         }
         form {
@@ -42,7 +42,6 @@ app.get('/', (req, res) => {
           padding: 20px;
           border-radius: 8px;
           max-width: 600px;
-          margin-bottom: 30px;
           box-shadow: 0 0 10px rgba(0,0,0,0.1);
         }
         label {
@@ -60,11 +59,19 @@ app.get('/', (req, res) => {
         }
         button {
           padding: 10px 15px;
-          background-color: #0078D7;
           color: white;
           border: none;
           border-radius: 4px;
           cursor: pointer;
+          margin-right: 10px;
+        }
+        #pauseBtn { background-color: #FF9800; }
+        #resumeBtn { background-color: #4CAF50; }
+        #stopBtn { background-color: #F44336; }
+        #refreshBtn { background-color: #0078D7; }
+        button:disabled {
+          background-color: #ccc;
+          cursor: not-allowed;
         }
         #status {
           background-color: #e6f7ff;
@@ -88,6 +95,9 @@ app.get('/', (req, res) => {
         <textarea id="content" name="content" rows="8" required></textarea>
 
         <button type="submit">Send Emails</button>
+        <button type="button" id="pauseBtn" style="display:none;">Pause</button>
+        <button type="button" id="resumeBtn" style="display:none;">Resume</button>
+        <button type="button" id="stopBtn" style="display:none;">Stop</button>
       </form>
 
       <a href="/download-sample-csv" target="_blank">Download Sample CSV</a>
@@ -104,8 +114,11 @@ app.get('/', (req, res) => {
           const res = await fetch('/send-bulk-emails', { method: 'POST', body: formData });
           const data = await res.json();
           jobId = data.jobId;
+
           document.getElementById('status').style.display = 'block';
           document.getElementById('status').innerText = 'Sending started...';
+          document.getElementById('pauseBtn').style.display = 'inline-block';
+          document.getElementById('stopBtn').style.display = 'inline-block';
           document.getElementById('refreshBtn').style.display = 'inline-block';
         });
 
@@ -120,6 +133,31 @@ app.get('/', (req, res) => {
             'Total: ' + status.total + '\\n' +
             'Completed: ' + (status.completed ? 'Yes' : 'No');
         });
+
+        async function controlJob(action) {
+          if (!jobId) return;
+          await fetch('/email-control', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ jobId, action })
+          });
+
+          if (action === 'pause') {
+            document.getElementById('pauseBtn').style.display = 'none';
+            document.getElementById('resumeBtn').style.display = 'inline-block';
+          } else if (action === 'resume') {
+            document.getElementById('resumeBtn').style.display = 'none';
+            document.getElementById('pauseBtn').style.display = 'inline-block';
+          } else if (action === 'stop') {
+            document.getElementById('pauseBtn').disabled = true;
+            document.getElementById('resumeBtn').disabled = true;
+            document.getElementById('stopBtn').disabled = true;
+          }
+        }
+
+        document.getElementById('pauseBtn').addEventListener('click', () => controlJob('pause'));
+        document.getElementById('resumeBtn').addEventListener('click', () => controlJob('resume'));
+        document.getElementById('stopBtn').addEventListener('click', () => controlJob('stop'));
       </script>
     </body>
     </html>
@@ -145,7 +183,9 @@ app.post('/send-bulk-emails', upload.single('csvFile'), (req, res) => {
     failed: [],
     invalid: [],
     total: 0,
-    completed: false
+    completed: false,
+    paused: false,
+    stopped: false
   };
 
   fs.createReadStream(filePath)
@@ -160,6 +200,19 @@ app.post('/send-bulk-emails', upload.single('csvFile'), (req, res) => {
     });
 });
 
+app.post('/email-control', (req, res) => {
+  const { jobId, action } = req.body;
+  const job = jobStatus[jobId];
+
+  if (!job) return res.status(404).json({ error: 'Invalid job ID' });
+
+  if (action === 'pause') job.paused = true;
+  else if (action === 'resume') job.paused = false;
+  else if (action === 'stop') job.stopped = true;
+
+  res.json({ message: `Job ${action}d.` });
+});
+
 function convertUrlsToLinks(text) {
   const regex = /(\b(https?|ftp):\/\/[-A-Z0-9+&@#\/%?=~_|!:,.;]*[-A-Z0-9+&@#\/%=~_|])/ig;
   return text.replace(regex, '<a href="$1" target="_blank">$1</a>');
@@ -167,7 +220,14 @@ function convertUrlsToLinks(text) {
 
 async function sendEmails(subject, emailList, content, jobId) {
   const sender = "Tarun Singhal <inclusion.pwd@saarathee.com>";
+
   for (const email of emailList) {
+    if (jobStatus[jobId].stopped) break;
+
+    while (jobStatus[jobId].paused) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
     if (!validator.validate(email)) {
       jobStatus[jobId].invalid.push(email);
       continue;
